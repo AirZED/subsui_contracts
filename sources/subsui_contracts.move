@@ -102,13 +102,29 @@ public entry fun create_event(
     transfer::share_object(event)
 }
 
-/// Buy a ticket for an event
-public entry fun buy_ticket(event: &mut Event, payment: &mut Coin<SUI>, ctx: &mut TxContext) {
-    assert!(event.is_active, EEventActive); // Ensure the event is still active
-    assert!(event.tickets_sold < event.max_tickets, EEventSoldOut); // Ensure tickets are available
-    assert!(coin::value(payment) >= event.price_per_ticket, EInsufficientPayment); // Ensure the payment is sufficient
+// Helper function to determine price based on user's engagement
+fun get_price_for_user(event: &Event, profile: &UserProfile): u64 {
+    let mut i = 0;
+    let len = vector::length(&event.pricing_tiers);
+    let base_price = event.price_per_ticket;
 
-    // Create a ticket
+    while (i < len) {
+        let tier = vector::borrow(&event.pricing_tiers, i);
+        if (profile.engagement_score >= tier.required_engagement_score) {
+            return tier.price
+        };
+        i = i + 1;
+    };
+
+    base_price
+}
+
+// Regular ticket purchase for anyone
+public entry fun buy_ticket(event: &mut Event, payment: &mut Coin<SUI>, ctx: &mut TxContext) {
+    assert!(event.is_active, EEventActive);
+    assert!(event.tickets_sold < event.max_tickets, EEventSoldOut);
+    assert!(coin::value(payment) >= event.price_per_ticket, EInsufficientPayment);
+
     let ticket = Ticket {
         id: object::new(ctx),
         event_id: object::id_address(event),
@@ -116,12 +132,41 @@ public entry fun buy_ticket(event: &mut Event, payment: &mut Coin<SUI>, ctx: &mu
         purchase_price: event.price_per_ticket,
     };
 
-    // Increment tickets sold
     event.tickets_sold = event.tickets_sold + 1;
     event.revenue = event.revenue + event.price_per_ticket;
 
-    // Transfer the ticket to the buyer
     let paid = coin::split(payment, event.price_per_ticket, ctx);
+    transfer::public_transfer(paid, event.creator);
+    transfer::transfer(ticket, tx_context::sender(ctx));
+}
+
+// Purchase with profile benefits
+public entry fun buy_ticket_with_profile(
+    event: &mut Event,
+    profile: &mut UserProfile,
+    payment: &mut Coin<SUI>,
+    ctx: &mut TxContext,
+) {
+    assert!(event.is_active, EEventActive);
+    assert!(event.tickets_sold < event.max_tickets, EEventSoldOut);
+
+    let final_price = get_price_for_user(event, profile);
+    assert!(coin::value(payment) >= final_price, EInsufficientPayment);
+
+    let ticket = Ticket {
+        id: object::new(ctx),
+        event_id: object::id_address(event),
+        owner: tx_context::sender(ctx),
+        purchase_price: final_price,
+    };
+
+    // Only update loyalty points on purchase
+    profile.loyalty_points = profile.loyalty_points + 10;
+
+    event.tickets_sold = event.tickets_sold + 1;
+    event.revenue = event.revenue + final_price;
+
+    let paid = coin::split(payment, final_price, ctx);
     transfer::public_transfer(paid, event.creator);
     transfer::transfer(ticket, tx_context::sender(ctx));
 }
@@ -185,4 +230,52 @@ public entry fun check_in_attendee(ticket: &Ticket, event: &mut Event, ctx: &mut
 
     event.attendance_count = event.attendance_count + 1;
     transfer::share_object(attendance);
+}
+
+// Create user profile
+public entry fun create_user_profile(ctx: &mut TxContext) {
+    let profile = UserProfile {
+        id: object::new(ctx),
+        address: tx_context::sender(ctx),
+        engagement_score: 0,
+        loyalty_points: 0,
+        events_attended: vector::empty(),
+        membership_tier: 1,
+    };
+    transfer::transfer(profile, tx_context::sender(ctx))
+}
+
+// Add pricing tier to event
+public entry fun add_pricing_tier(
+    event: &mut Event,
+    tier_level: u8,
+    price: u64,
+    required_engagement_score: u64,
+    ctx: &mut TxContext,
+) {
+    assert!(event.creator == tx_context::sender(ctx), EUnauthorized);
+
+    let tier = PricingTier {
+        tier_level,
+        price,
+        required_engagement_score,
+    };
+    vector::push_back(&mut event.pricing_tiers, tier)
+}
+
+// Update user engagement score
+public entry fun update_engagement_score(
+    profile: &mut UserProfile,
+    points: u64,
+    ctx: &mut TxContext,
+) {
+    assert!(tx_context::sender(ctx) == profile.address, EUnauthorized);
+    profile.engagement_score = profile.engagement_score + points;
+
+    // Update membership tier based on engagement
+    if (profile.engagement_score > 1000) {
+        profile.membership_tier = 3; // Gold
+    } else if (profile.engagement_score > 500) {
+        profile.membership_tier = 2; // Silver
+    };
 }
